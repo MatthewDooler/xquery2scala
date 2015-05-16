@@ -4,21 +4,29 @@ from pyparsing import Literal, Word, Optional, ZeroOrMore, Empty, Group, Combine
 
 # XQuery Grammar: http://www.w3.org/TR/xquery/
 
+Separator = Literal(";").suppress()
+
+String = Word(alphas+"0123456789.-&;")
+StringLiteral = (Literal('"') + String + Literal('"')) | Literal("'") + String + Literal("'")
+
+VersionDecl = Literal("xquery") + Literal("version") + StringLiteral + Optional(Literal("encoding") + StringLiteral) + Separator
+
+# QName
 NameStartChar = Word(alphas + "_")
 NameChar = Word(alphas + "_-.0123456789")
 Name = NameStartChar + ZeroOrMore(NameChar)
 NCName = Combine(Name)
-
 LocalPart = NCName.setResultsName("localpart")
 Prefix = NCName.setResultsName("prefix")
 UnprefixedName = LocalPart
 PrefixedName = Prefix + Literal(":") + LocalPart
 QName = Combine(PrefixedName | UnprefixedName)
 
+# Types and occurrence indicators
 AnyKindTest = Literal("node") + Literal("(") + Literal(")")
 TextTest = Literal("text") + Literal("(") + Literal(")")
 CommentTest = Literal("comment") + Literal("(" ")")
-#PITest = Literal("processing-instruction") + Literal("(") + Optional(NCName | StringLiteral) + Literal(")")
+PITest = Literal("processing-instruction") + Literal("(") + Optional(NCName | StringLiteral) + Literal(")")
 TypeName = QName
 AttributeName = QName
 AttribNameOrWildcard = AttributeName | Literal("*")
@@ -31,25 +39,62 @@ ElementDeclaration = ElementName
 SchemaElementTest = Literal("schema-element") + Literal("(") + ElementDeclaration + Literal(")")
 ElementTest = Literal("element") + Literal("(") + Optional(ElementNameOrWildcard + Optional(Literal(",").suppress() + TypeName + Optional(Literal("?")))) + Literal(")")
 DocumentTest = Literal("document-node") + Literal("(") + Optional(ElementTest | SchemaElementTest) + Literal(")")
-KindTest = DocumentTest | ElementTest | AttributeTest | SchemaElementTest | SchemaAttributeTest | CommentTest | TextTest | AnyKindTest
-# TODO: support processing instructions (PITest)
-
+KindTest = DocumentTest | ElementTest | AttributeTest | SchemaElementTest | SchemaAttributeTest | PITest | CommentTest | TextTest | AnyKindTest
 AtomicType = QName
 OccurrenceIndicator = (Literal("?") | Literal("*") | Literal("+")).setResultsName("occurrence")
 ItemType = (KindTest | (Literal("item") + Literal("(") + Literal(")")) | AtomicType).setResultsName("type")
 SequenceType = (Literal("empty-sequence") + Literal("(") + Literal(")")) | (ItemType + Optional(OccurrenceIndicator))
 
+# Parameters
 TypeDeclaration = Literal("as") + SequenceType
-Param          = Group(Literal("$").suppress() + QName.setResultsName("name") + Optional(TypeDeclaration))
-ParamList      = Param + ZeroOrMore(Literal(",").suppress() + Param)
+Param           = Group(Literal("$").suppress() + QName.setResultsName("name") + Optional(TypeDeclaration))
+ParamList       = Param + ZeroOrMore(Literal(",").suppress() + Param)
 
-Expr = Word(alphas) # TODO: parse expressions
-EnclosedExpr = Literal("{").suppress() + Expr + Literal("}").suppress()
+# Expressions
+QueryBody     = Expr
+Expr          = ExprSingle ("," ExprSingle)*
+ExprSingle    = FLWORExpr | QuantifiedExpr | TypeswitchExpr | IfExpr | OrExpr
+EnclosedExpr  = Literal("{").suppress() + Expr + Literal("}").suppress()
 
-FunctionDecl = Group(Literal("declare") + Literal("function") + QName.setResultsName("name") + Literal("(") + Optional(ParamList).setResultsName("params") + Literal(")") + Optional(Literal("as").suppress() + SequenceType).setResultsName("rtype") + (EnclosedExpr | "external").setResultsName("body"))
+# Prolog: Imports
+URILiteral    = StringLiteral # TODO: StringLiteral will need to include slashes etc
+SchemaPrefix  = (Literal("namespace") + NCName + Literal("=")) | (Literal("default") + Literal("element") + Literal("namespace"))
+SchemaImport  = Literal("import") + Literal("schema") + Optional(SchemaPrefix) + URILiteral + Optional("at" + URILiteral + ZeroOrMore(Literal(",") + URILiteral))
+ModuleImport  = Literal("import") + Literal("module") + Optional(Literal("namespace") + NCName + Literal("=")) + URILiteral + Optional(Literal("at") + URILiteral + ZeroOrMore(Literal(",") + URILiteral))
+Import        = SchemaImport | ModuleImport
 
+# Prolog: Declarations
+NamespaceDecl         = Literal("declare") + Literal("namespace") + NCName + Literal("=") + URILiteral
+BoundarySpaceDecl     = Literal("declare") + Literal("boundary-space") + (Literal("preserve") | Literal("strip"))
+DefaultNamespaceDecl  = Literal("declare") + Literal("default") + (Literal("element") | Literal("function")) + Literal("namespace") + URILiteral
+OptionDecl            = Literal("declare") + Literal("option") + QName + StringLiteral
+OrderingModeDecl      = Literal("declare") + Literal("ordering") + (Literal("ordered") | Literal("unordered"))
+EmptyOrderDecl        = Literal("declare") + Literal("default") + Literal("order") + Literal("empty") + (Literal("greatest") | Literal("least"))
+PreserveMode          = Literal("preserve") | Literal("no-preserve")
+InheritMode           = Literal("inherit") | Literal("no-inherit")
+CopyNamespacesDecl    = Literal("declare") + Literal("copy-namespaces") + PreserveMode + Literal(",") + InheritMode
+DefaultCollationDecl  = Literal("declare") + Literal("default") + Literal("collation") + URILiteral
+BaseURIDecl           = Literal("declare") + Literal("base-uri") + URILiteral
 
-grammar = (FunctionDecl + ZeroOrMore(Literal(";").suppress() + FunctionDecl)).setResultsName("functions")
+VarDecl           = Literal("declare") + Literal("variable") + Literal("$") + QName + Optional(TypeDeclaration) ((Literal(":=") + ExprSingle) | Literal("external"))
+ConstructionDecl  = Literal("declare") + Literal("construction") + (Literal("strip") | Literal("preserve"))
+FunctionDecl      = Group(Literal("declare") + Literal("function") + QName.setResultsName("name") + Literal("(") + Optional(ParamList).setResultsName("params") + Literal(")") + Optional(Literal("as").suppress() + SequenceType).setResultsName("rtype") + (EnclosedExpr | "external").setResultsName("body"))
+
+Setter = BoundarySpaceDecl | DefaultCollationDecl | BaseURIDecl | ConstructionDecl | OrderingModeDecl | EmptyOrderDecl | CopyNamespacesDecl
+Prolog = ZeroOrMore((DefaultNamespaceDecl | Setter | NamespaceDecl | Import) + Separator) + ZeroOrMore((VarDecl | FunctionDecl | OptionDecl) + Separator)
+
+QueryBody = Word(alphas) # TODO
+ModuleDecl = Word(alphas) # TODO
+
+LibraryModule   = ModuleDecl + Prolog
+MainModule      = Prolog + QueryBody
+Module          = Optional(VersionDecl) + (LibraryModule | MainModule)
+Grammar         = Module
+
+#grammar = (
+#  VersionDecl +
+#  (FunctionDecl + ZeroOrMore(Separator + FunctionDecl)).setResultsName("functions")
+#)
 
 # TODO: add all of the other types!
 types = {
